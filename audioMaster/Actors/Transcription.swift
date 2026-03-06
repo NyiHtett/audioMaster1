@@ -20,10 +20,12 @@ actor TranscriptionActor {
     private let tokenVault: TokenVaultActor
     private let monitor = NWPathMonitor()
 
+    // online/offline gate for queue processing
     private var isOnline = true
     private var queue: [QueuedSegment] = []
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
     private let maxConcurrentJobs = 2
+    // after repeated remote failures we fallback to local speech recognizer
     private var consecutiveRemoteFailures = 0
 
     private var runtimeContinuation: AsyncStream<TranscriptionRuntimeEvent>.Continuation?
@@ -38,6 +40,7 @@ actor TranscriptionActor {
     init(dataManager: DataManagerActor = .shared, tokenVault: TokenVaultActor = .shared) {
         self.dataManager = dataManager
         self.tokenVault = tokenVault
+        // monitor runs continuously and wakes queue pump when network returns
         monitor.pathUpdateHandler = { [weak self] path in
             Task { await self?.setNetworkAvailability(path.status == .satisfied) }
         }
@@ -49,6 +52,7 @@ actor TranscriptionActor {
     }
 
     func enqueue(_ segment: QueuedSegment) async {
+        // new segment jobs are appended and drained by pump()
         queue.append(segment)
         await pump()
     }
@@ -73,6 +77,7 @@ actor TranscriptionActor {
     private func pump() async {
         guard isOnline else { return }
 
+        // start as many jobs as allowed by max concurrency
         while activeTasks.count < maxConcurrentJobs, !queue.isEmpty {
             let item = queue.removeFirst()
             let task = Task {
@@ -100,6 +105,7 @@ actor TranscriptionActor {
                 let source: TranscriptionSource
 
                 if consecutiveRemoteFailures >= 5 {
+                    // fallback path when remote api has repeated failures
                     transcription = try await transcribeLocally(url: item.url)
                     source = .appleLocal
                 } else {
@@ -152,10 +158,12 @@ actor TranscriptionActor {
                 }
 
                 if !isOnline {
+                    // put it back so it can resume after connectivity returns
                     queue.append(item)
                     return
                 }
 
+                // exponential backoff: 2s, 4s, 8s... capped to 20s
                 let backoff = min(pow(2, Double(retryCount)), 20)
                 try? await Task.sleep(for: .seconds(backoff))
             }
@@ -174,6 +182,7 @@ actor TranscriptionActor {
         request.setValue(token, forHTTPHeaderField: "xi-api-key")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
+        // multipart form body for elevenlabs speech-to-text endpoint
         var body = Data()
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"model_id\"\r\n\r\n".data(using: .utf8)!)
@@ -209,6 +218,7 @@ actor TranscriptionActor {
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = false
 
+        // bridge callback-style speech api to async/await
         return try await withCheckedThrowingContinuation { continuation in
             var didResume = false
             let task = recognizer.recognitionTask(with: request) { result, error in
@@ -224,6 +234,7 @@ actor TranscriptionActor {
             }
 
             Task {
+                // safety timeout so local recognition never hangs forever
                 try? await Task.sleep(for: .seconds(50))
                 if !didResume {
                     didResume = true

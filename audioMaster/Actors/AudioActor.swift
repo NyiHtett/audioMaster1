@@ -8,6 +8,7 @@ private final class SegmentFileWriter: @unchecked Sendable {
     func rotate(to url: URL, settings: [String: Any]) throws {
         lock.lock()
         defer { lock.unlock() }
+        // switch to the next file safely while mic buffers keep coming in
         self.file = try AVAudioFile(forWriting: url, settings: settings)
     }
 
@@ -121,6 +122,7 @@ actor AudioActor {
             try createNextSegment(index: 0)
 
             if !engine.isRunning { try engine.start() }
+            // rotate files in fixed chunks so each one can be transcribed independently
             startSegmentRotationTask()
 
             await liveActivity.start(sessionID: sessionID, title: title, startTime: runtime.startedAt ?? Date(), inputDevice: inputName)
@@ -200,6 +202,7 @@ actor AudioActor {
 
         engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             self?.writer.write(buffer)
+            // convert raw pcm levels to simple bars for waveform/live activity UI
             let bars = Self.bars(from: buffer)
             Task { await self?.handleInputBars(bars) }
         }
@@ -235,6 +238,7 @@ actor AudioActor {
         let endedAt = Date()
 
         do {
+            // save pending segment first so user can see it immediately in the list
             let segmentID = try await dataManager.addPendingSegment(
                 sessionID: sessionID,
                 index: activeSegment.index,
@@ -274,6 +278,7 @@ actor AudioActor {
                 try? await Task.sleep(for: .seconds(segmentLengthSeconds))
                 guard !Task.isCancelled else { return }
                 guard await self.isActivelyRecording() else { continue }
+                // rollover keeps recording continuous while chunking per segment length
                 await self.rotateAndQueueCurrentSegment(createNext: true)
             }
         }
@@ -284,6 +289,7 @@ actor AudioActor {
     }
 
     private func observeAudioNotifications() {
+        // keep app state synced with ios interruption and route-change events
         observeInterruptionsTask = Task { [weak self] in
             guard let self else { return }
             for await note in NotificationCenter.default.notifications(named: AVAudioSession.interruptionNotification) {
@@ -304,6 +310,7 @@ actor AudioActor {
             guard let self else { return }
             let stream = await self.transcription.eventStream()
             for await event in stream {
+                // feed transcription updates back into the runtime counters
                 await self.handleTranscriptionEvent(event)
             }
         }

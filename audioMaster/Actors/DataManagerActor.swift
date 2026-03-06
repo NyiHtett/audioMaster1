@@ -12,6 +12,7 @@ final class RecordingSession {
     var totalSegments: Int
     var transcribedSegments: Int
 
+    // delete all child segments automatically when a session is removed
     @Relationship(deleteRule: .cascade, inverse: \TranscriptionSegment.session)
     var segments: [TranscriptionSegment]
 
@@ -54,6 +55,7 @@ final class TranscriptionSegment {
     var createdAt: Date
     var updatedAt: Date
 
+    // relation back to parent session so we can query by session id
     var session: RecordingSession?
 
     init(
@@ -107,12 +109,14 @@ actor DataManagerActor {
             let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
             self.container = try ModelContainer(for: schema, configurations: config)
             self.context = ModelContext(container)
+            // manual save gives predictable write points during heavy segment ingestion
             self.context.autosaveEnabled = false
         } catch {
             fatalError("Unable to bootstrap SwiftData: \(error)")
         }
     }
 
+    // create a session row and return id so audio/transcription can attach segments
     func createSession(title: String, quality: RecordingQualityPreset, inputDevice: String) throws -> UUID {
         let session = RecordingSession(title: title, startedAt: Date(), quality: quality, inputDevice: inputDevice)
         context.insert(session)
@@ -147,7 +151,7 @@ actor DataManagerActor {
         segment.session = session
         session.totalSegments += 1
         context.insert(segment)
-        // Persist immediately so the UI can show pending segments right away.
+        // save immediately so pending segment shows up in UI without delay
         try context.save()
 
         return segment.id
@@ -206,6 +210,7 @@ actor DataManagerActor {
         let models = try context.fetch(descriptor)
         let normalizedSearch = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
+        // keep search filtering in-memory after paging fetch
         return models
             .filter { normalizedSearch.isEmpty || $0.title.lowercased().contains(normalizedSearch) }
             .map {
@@ -230,6 +235,7 @@ actor DataManagerActor {
         descriptor.fetchLimit = limit
         descriptor.fetchOffset = offset
 
+        // segments are sorted by capture index to preserve spoken timeline
         return try context.fetch(descriptor).map {
             TranscriptionSegmentDTO(
                 id: $0.id,

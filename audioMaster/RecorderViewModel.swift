@@ -24,6 +24,7 @@ final class RecorderViewModel: ObservableObject {
     private var lastObservedTotalSegments = 0
     private var lastObservedTranscribedSegments = 0
 
+    // start live listeners and bootstrap initial data when the view appears
     func start() {
         Task {
             let stream = await audio.runtimeUpdates()
@@ -39,6 +40,7 @@ final class RecorderViewModel: ObservableObject {
         }
     }
 
+    // start recording with the quality selected from UI
     func startRecording() {
         Task {
             await audio.startRecording(sessionName: nil, quality: selectedQuality)
@@ -71,6 +73,7 @@ final class RecorderViewModel: ObservableObject {
         }
     }
 
+    // reload from first page so search and selection stay in sync
     func loadInitialSessions() async {
         sessionOffset = 0
         hasMoreSessions = true
@@ -94,6 +97,7 @@ final class RecorderViewModel: ObservableObject {
         }
     }
 
+    // pagination hook for the session list (called on last row)
     func loadMoreSessionsIfNeeded(current item: RecordingSessionDTO) {
         guard hasMoreSessions, let last = sessions.last, item.id == last.id else { return }
         Task {
@@ -138,10 +142,12 @@ final class RecorderViewModel: ObservableObject {
         Task { await loadInitialSessions() }
     }
 
+    // fetch all visible segments for one selected session
     private func loadSegments(for sessionID: UUID) async throws {
         selectedSegments = try await data.fetchSegments(sessionID: sessionID, limit: 300, offset: 0)
     }
 
+    // only refresh UI when segment counters actually changed
     private func handleRuntimeSnapshot(_ snapshot: RecordingRuntimeSnapshot) async {
         guard let selected = selectedSession,
               snapshot.sessionID == selected.id else { return }
